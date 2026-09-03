@@ -1,0 +1,17 @@
+{
+  "name": "Relay Room",
+  "short_name": "Relay Room",
+  "description": "Escape an unknown facility with a blind AI connected through WebMCP.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0e13",
+  "theme_color": "#0b0e13",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
