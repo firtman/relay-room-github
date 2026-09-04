@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { createContactCode, evaluateDoorRelease } from "@/app/relay-authorization";
 
 type Channel = "alpha" | "beta" | "gamma";
 type Port = "north" | "east" | "south";
@@ -36,6 +37,7 @@ type GameState = {
   activeChannel: Channel | null;
   connections: Partial<Record<Channel, Port>>;
   armedUntil: number;
+  contactCode: string | null;
   relayMessage: string;
   events: StoryEvent[];
   nextEventId: number;
@@ -123,6 +125,7 @@ function createMission(seedIndex: number, startedAt = 0): GameState {
     activeChannel: null,
     connections: {},
     armedUntil: 0,
+    contactCode: null,
     relayMessage: "I can hear you. I cannot see where you are. Tell me what is in front of you.",
     events: [{ id: 1, actor: "facility", message: "An unknown carrier signal reaches the room" }],
     nextEventId: 2,
@@ -181,8 +184,8 @@ function sceneCopy(stage: GameStage) {
     location: "Unknown facility · Exit lock",
     title: "A white seam appears in the final door.",
     beat: "The facility requires two forms of consent: a living hand at the door and a valid release command somewhere else in the network.",
-    move: `Hold the authorization sensor for 1.4 seconds. When it turns green, release it and tell Relay to open the door within ${AUTHORIZATION_WINDOW_SECONDS} seconds.`,
-    why: `Green means the authorization stays active for ${AUTHORIZATION_WINDOW_SECONDS} seconds. You do not need to keep holding the sensor.`,
+    move: "Hold the authorization sensor for 1.4 seconds. When it turns green, release it and send Relay the one-time contact code shown on the sensor.",
+    why: `The code appears only after your touch and expires after ${AUTHORIZATION_WINDOW_SECONDS} seconds. Relay cannot open the door until you report it in a new message.`,
   };
 }
 
@@ -202,6 +205,7 @@ export default function Home() {
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [voicePlaying, setVoicePlaying] = useState(false);
   const [connectionPath, setConnectionPath] = useState<ConnectionPath>("chatgpt-desktop");
+  const [reviewingActiveMission, setReviewingActiveMission] = useState(false);
 
   const gameRef = useRef(game);
   const registeredToolsRef = useRef<string[]>([]);
@@ -226,8 +230,8 @@ export default function Home() {
         ? `Step 2 of 2 — Click the ${activePort?.toUpperCase()} port on the right to connect the glowing ${game.activeChannel.toUpperCase()} cable.`
         : `Step 1 of 2 — In ${relayClient}, say: “Energize the next channel and tell me which port to use.”`
       : isArmed
-        ? `Authorization is active for ${Math.max(0, Math.ceil((game.armedUntil - now) / 1000))} more seconds. Release the sensor and tell Relay: “The contact is live. Open the door now.”`
-        : `Hold the authorization sensor for 1.4 seconds until it turns green. Then release it; Relay will have ${AUTHORIZATION_WINDOW_SECONDS} seconds.`;
+        ? `Release the sensor. In ${relayClient}, send a new message: “CONTACT ${game.contactCode} IS LIVE. Open the door now.”`
+        : "Hold the authorization sensor for 1.4 seconds. Release it only after a one-time contact code appears.";
   const humanInstructionNote = game.stage === 2
     ? game.activeChannel
       ? connectedCount === 2
@@ -313,8 +317,9 @@ export default function Home() {
         const stored = localStorage.getItem(GAME_KEY);
         const parsed = stored ? JSON.parse(stored) as GameState : null;
         if (parsed?.missionId && parsed.status !== "dormant") {
-          setGame(parsed);
-          gameRef.current = parsed;
+          const restored = { ...parsed, armedUntil: 0, contactCode: null };
+          setGame(restored);
+          gameRef.current = restored;
           setHasSavedGame(true);
         }
         setBestScore(Number(localStorage.getItem(BEST_KEY) ?? 0));
@@ -447,7 +452,7 @@ export default function Home() {
       }
       const connections = { ...current.connections, [channel]: port };
       const complete = Object.keys(connections).length === CHANNELS.length;
-      const next: GameState = { ...current, connections, activeChannel: null, stage: complete ? 3 : 2, relayMessage: complete ? "Power is stable. I can see one final lock on the network." : "Good. The connection is stable. Ask me to energize another channel." };
+      const next: GameState = { ...current, connections, activeChannel: null, stage: complete ? 3 : 2, armedUntil: 0, contactCode: null, relayMessage: complete ? "Power is stable. I can see one final lock on the network." : "Good. The connection is stable. Ask me to energize another channel." };
       const logged = appendEvent(next, "human", `Physically connected ${channel.toUpperCase()} to ${port.toUpperCase()}`);
       return complete ? appendEvent(logged, "facility", "Power reaches the final door") : logged;
     });
@@ -483,28 +488,41 @@ export default function Home() {
     return { ok: true, correct, scorePenalty: 600, message: correct ? "The diagnostic confirms it." : "The diagnostic rejects it." };
   }, [mutateGame]);
 
-  const releaseDoor = useCallback((rawCode: string) => {
-    const code = rawCode.replace(/\D/g, "");
+  const releaseDoor = useCallback((rawCode: string, rawContactCode: string) => {
     const timestamp = Date.now();
     const snapshot = gameRef.current;
-    const canRelease = snapshot.stage === 3 && snapshot.status === "playing" && snapshot.armedUntil > timestamp;
-    const correctCode = canRelease && code === getFinalCode(getPuzzle(snapshot));
+    const correctCode = evaluateDoorRelease(snapshot, {
+      now: timestamp,
+      releaseCode: rawCode,
+      contactCode: rawContactCode,
+      expectedReleaseCode: getFinalCode(getPuzzle(snapshot)),
+    }).ok;
     let result: Record<string, unknown> = { ok: false, message: "Release rejected." };
     mutateGame((current) => {
       let next = { ...current, toolCalls: current.toolCalls + 1 };
-      if (current.stage !== 3 || current.status !== "playing") {
+      const decision = evaluateDoorRelease(current, {
+        now: timestamp,
+        releaseCode: rawCode,
+        contactCode: rawContactCode,
+        expectedReleaseCode: getFinalCode(getPuzzle(current)),
+      });
+      if (!decision.ok && decision.reason === "lock_not_ready") {
         result = { ok: false, message: "The exit lock is not ready." };
         return next;
       }
-      if (current.armedUntil <= timestamp) {
-        result = { ok: false, message: `No active human authorization. Ask the human to hold the sensor for 1.4 seconds until it turns green. They may release it after that; you will have ${AUTHORIZATION_WINDOW_SECONDS} seconds to send the release code.` };
+      if (!decision.ok && decision.reason === "contact_expired") {
+        result = { ok: false, message: `No active human authorization. Ask the human to hold the sensor for 1.4 seconds until it turns green, then wait for them to report the one-time contact code in a new message.` };
         return appendEvent(next, "relay", "Tried to release the door without the human sensor");
       }
-      if (code !== getFinalCode(getPuzzle(current))) {
+      if (!decision.ok && decision.reason === "contact_code_required") {
+        result = { ok: false, message: "Human confirmation is missing or invalid. Do not guess or retry. Wait for the human to send the exact six-character contact code currently shown on the green sensor." };
+        return appendEvent(next, "relay", "Tried to release the door without the current human contact code");
+      }
+      if (!decision.ok) {
         result = { ok: false, message: "The facility rejected the release code." };
         return appendEvent({ ...next, mistakes: next.mistakes + 1 }, "relay", "Submitted an invalid release code");
       }
-      next = { ...next, status: "won", finishedAt: timestamp, relayMessage: "The door is opening. Wait… that is not outside." };
+      next = { ...next, status: "won", finishedAt: timestamp, armedUntil: 0, contactCode: null, relayMessage: "The door is opening. Wait… that is not outside." };
       result = { ok: true, message: "The door opened. Something is waiting beyond it.", score: getScore(next, timestamp) };
       return appendEvent(next, "facility", "The exit door opens into a second, larger chamber");
     });
@@ -579,7 +597,7 @@ export default function Home() {
             glyphOffsets: currentPuzzle.glyphOffsets,
             routingTable: currentPuzzle.routes,
             finalRule: "Release code = three-digit frequency + port digits for alpha, beta, gamma. north=1, east=2, south=3.",
-            constraint: `The human must hold the authorization sensor for 1.4 seconds until it turns green. They may then release it; relay_release_door has a ${AUTHORIZATION_WINDOW_SECONDS}-second authorization window.`,
+            constraint: `The human must hold the authorization sensor for 1.4 seconds until it turns green. A six-character contact code then appears only on their page. Wait for the human to send that code in a new chat message before calling relay_release_door. Never guess or retry a contact code.`,
           };
         },
       },
@@ -647,9 +665,9 @@ export default function Home() {
       {
         name: "relay_release_door",
         title: "Release the exit door",
-        description: `Send the final six-digit release code during the ${AUTHORIZATION_WINDOW_SECONDS}-second authorization window. The human starts the window by holding the sensor for 1.4 seconds until it turns green, then may release it. Do not tell them to keep holding the sensor.`,
-        inputSchema: { type: "object", properties: { code: { type: "string", pattern: "^[0-9]{6}$" } }, required: ["code"], additionalProperties: false },
-        execute: async (input: Record<string, unknown>) => actionsRef.current.releaseDoor(String(input.code)),
+        description: `Release the door only after the human holds the sensor until it turns green and sends a new chat message containing the six-character contact code shown on their page. Pass that exact contact code with the final six-digit release code. Never guess or retry the contact code.`,
+        inputSchema: { type: "object", properties: { code: { type: "string", pattern: "^[0-9]{6}$" }, contactCode: { type: "string", pattern: "^[A-Z2-9]{6}$" } }, required: ["code", "contactCode"], additionalProperties: false },
+        execute: async (input: Record<string, unknown>) => actionsRef.current.releaseDoor(String(input.code), String(input.contactCode)),
       },
     ];
 
@@ -710,6 +728,7 @@ export default function Home() {
   };
 
   const openEyes = () => {
+    setReviewingActiveMission(false);
     setScreen("briefing");
     const supportsWebMcp = Boolean((document as Document & { modelContext?: ModelContext }).modelContext?.registerTool);
     void playVoiceSequence([
@@ -727,6 +746,7 @@ export default function Home() {
     gameRef.current = mission;
     setNow(startedAt);
     setPracticeMode(solo);
+    setReviewingActiveMission(false);
     setScreen("mission");
     setHasSavedGame(true);
     if (reconnecting) void playVoiceSequence([RELAY_VOICE.reconnection]);
@@ -737,6 +757,7 @@ export default function Home() {
 
   const resumeMission = () => {
     setPracticeMode(false);
+    setReviewingActiveMission(false);
     setScreen("mission");
     void playVoiceSequence([RELAY_VOICE.reconnection]);
   };
@@ -749,8 +770,9 @@ export default function Home() {
       armTimerRef.current = null;
       setArming(false);
       const armedAt = Date.now();
+      const contactCode = createContactCode();
       setNow(armedAt);
-      mutateGame((current) => appendEvent({ ...current, armedUntil: armedAt + AUTHORIZATION_WINDOW_MS, relayMessage: `Contact accepted for ${AUTHORIZATION_WINDOW_SECONDS} seconds. You can release the sensor. Tell me to open the door now.` }, "human", "Authorized the exit lock with a living hand"));
+      mutateGame((current) => appendEvent({ ...current, armedUntil: armedAt + AUTHORIZATION_WINDOW_MS, contactCode, relayMessage: `Contact accepted for ${AUTHORIZATION_WINDOW_SECONDS} seconds. Release the sensor and send me the one-time code shown there.` }, "human", "Authorized the exit lock with a living hand"));
       if (navigator.vibrate) navigator.vibrate([40, 30, 80]);
     }, 1400);
   };
@@ -771,7 +793,7 @@ export default function Home() {
     }
     const result = game.stage === 1
       ? actionsRef.current.accessSystem("carrier", operatorInput)
-      : actionsRef.current.releaseDoor(operatorInput);
+      : actionsRef.current.releaseDoor(operatorInput, gameRef.current.contactCode ?? "");
     setSoloFeedback(String(result.message ?? "Command sent."));
     if (result.ok) setOperatorInput("");
   };
@@ -865,14 +887,25 @@ export default function Home() {
             </section>
 
             <div className="start-actions">
-              {game.status === "playing" ? (
-                <Button onClick={() => setScreen("mission")}>Return to mission</Button>
+              {reviewingActiveMission && game.status === "playing" ? (
+                <Button onClick={() => {
+                  setReviewingActiveMission(false);
+                  setScreen("mission");
+                }}>Return to active mission</Button>
               ) : (
-                <Button disabled={!webMcp.registered} onClick={() => void startFresh(false)}>{webMcp.registered ? `Enter with ${connectionPath === "chatgpt-desktop" ? "ChatGPT Desktop" : "Chrome + WebMCP"}` : "Waiting for WebMCP connection"}</Button>
+                <Button disabled={!webMcp.registered} onClick={() => void startFresh(false)}>{webMcp.registered ? `Start with ${connectionPath === "chatgpt-desktop" ? "ChatGPT Desktop" : "Chrome + WebMCP"}` : "Waiting for WebMCP connection"}</Button>
               )}
               <Button variant="outline" onClick={() => void startFresh(true)}>Play solo simulation</Button>
             </div>
             <p className={`link-check ${webMcp.registered ? "ready" : ""}`} role="status"><i />{webMcp.registered ? `${TOOL_COUNT} WebMCP systems connected. Your selected setup is ready.` : webMcp.available ? `WebMCP was detected, but Relay could not connect: ${webMcp.message}` : webMcp.message}</p>
+            <section className="project-about" aria-labelledby="project-about-title">
+              <div>
+                <span>ABOUT THE PROJECT</span>
+                <h2 id="project-about-title">Relay Room is open source.</h2>
+                <p>The complete source code is available on GitHub.</p>
+              </div>
+              <a href="https://github.com/firtman/relay-room-github" target="_blank" rel="noreferrer">View the code on GitHub <span aria-hidden="true">↗</span></a>
+            </section>
             <p className="voice-disclosure">Relay&apos;s voice is AI-generated.</p>
           </section>
         )}
@@ -883,7 +916,10 @@ export default function Home() {
   return (
     <main className={`story-shell scene-${game.stage} ${game.status === "won" ? "scene-won" : ""} ${game.status === "dormant" ? "waiting-link" : ""}`}>
       <header className="story-hud">
-        <button type="button" className="story-brand" onClick={() => setScreen("briefing")}><i /><span>RELAY ROOM</span></button>
+        <button type="button" className="story-brand" onClick={() => {
+          setReviewingActiveMission(true);
+          setScreen("briefing");
+        }}><i /><span>RELAY ROOM</span></button>
         <div className="scene-progress" aria-label={`Scene ${game.stage} of 3`}>
           {[1, 2, 3].map((stage) => <span key={stage} className={game.stage >= stage ? "reached" : ""}><i />{stage}</span>)}
         </div>
@@ -994,8 +1030,8 @@ export default function Home() {
                     onBlur={cancelArm}
                   >
                     <i aria-hidden="true">◉</i>
-                    <strong>{isArmed ? "CONTACT ACCEPTED" : arming ? "DO NOT MOVE" : "HOLD YOUR HAND HERE"}</strong>
-                    <small>{isArmed ? `${Math.max(0, Math.ceil((game.armedUntil - now) / 1000))} seconds` : "Hold for 1.4 seconds"}</small>
+                    <strong>{isArmed ? `CONTACT ${game.contactCode}` : arming ? "DO NOT MOVE" : "HOLD YOUR HAND HERE"}</strong>
+                    <small>{isArmed ? `${Math.max(0, Math.ceil((game.armedUntil - now) / 1000))} seconds · Send this code to Relay` : "Hold for 1.4 seconds"}</small>
                   </button>
                 </div>
               </section>

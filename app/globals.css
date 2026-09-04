@@ -395,6 +395,57 @@ body::selection { background: var(--vermillion); color: var(--ink); }
   font: 400 8px/1.4 "B612 Mono", monospace;
 }
 
+.project-about {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+  margin-top: 24px;
+  padding: 20px 22px 20px 27px;
+  border: 1px solid #5a574f;
+  border-left: 7px solid var(--vermillion);
+  background: rgba(10,10,9,.92);
+  color: var(--paper);
+}
+
+.project-about > div { display: grid; gap: 6px; }
+
+.project-about > div > span {
+  color: var(--vermillion);
+  font: 700 10px/1 "B612 Mono", monospace;
+  letter-spacing: .14em;
+}
+
+.project-about h2 {
+  margin: 0;
+  font-size: clamp(20px, 2.2vw, 28px);
+  line-height: 1;
+  letter-spacing: -.035em;
+}
+
+.project-about p {
+  margin: 0;
+  color: #aaa59b;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.project-about > a {
+  flex: 0 0 auto;
+  padding: 13px 15px;
+  border: 1px solid var(--cyan);
+  color: var(--cyan);
+  font: 700 12px/1 "B612 Mono", monospace;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+
+.project-about > a:hover,
+.project-about > a:focus-visible {
+  background: var(--cyan);
+  color: var(--ink);
+}
+
 .connection-guide {
   display: grid;
   grid-template-columns: minmax(235px, .62fr) minmax(0, 1.38fr);
@@ -1048,6 +1099,8 @@ body::selection { background: var(--vermillion); color: var(--ink); }
   .premise-copy h1 { font-size: 41px; }
   .start-actions { display: grid; }
   .start-actions button { width: 100%; }
+  .project-about { align-items: flex-start; flex-direction: column; gap: 17px; }
+  .project-about > a { width: 100%; text-align: center; }
   .connection-guide-body { padding: 12px; }
   .connection-path-details ol { grid-template-columns: 1fr; }
 
