@@ -52,3 +52,11 @@ The main game logic and WebMCP tool definitions live in `app/page.tsx`.
 - `worker/` and `build/` — vinext/Cloudflare integration
 
 The exported `.openai/hosting.json` intentionally contains no Site project ID. A fork should register its own deployment instead of targeting the original Relay Room site.
+
+## Contributing
+
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the local development and validation workflow.
+
+## License
+
+Relay Room is released under the [MIT License](LICENSE). The included artwork and voice assets are part of this project unless otherwise noted.

@@ -1,7 +1,8 @@
 {
   "name": "relay-room",
   "version": "0.1.0",
-  "private": true,
+  "description": "An asymmetric human and AI escape-room game built around WebMCP.",
+  "license": "MIT",
   "engines": {
     "node": ">=22.13.0"
   },
